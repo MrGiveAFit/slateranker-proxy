@@ -84,23 +84,3 @@ export default async function handler(req, res) {
     });
   }
 }
-
-  const response = await fetch(
-    `https://api.balldontlie.io/v1/stats?player_ids[]=${pid}&per_page=${last_n}`,
-    { headers }
-  );
-
-  const raw = await response.json();
-
-  return res.status(200).json({
-    source: "balldontlie",
-    fetched_at: new Date().toISOString(),
-    data: raw.data ?? [],
-  });
-}
-
-    return res.status(400).json({ error: "Invalid type" });
-  } catch (err) {
-    return res.status(500).json({ error: err.message });
-  }
-}

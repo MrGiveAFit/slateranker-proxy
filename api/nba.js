@@ -1,4 +1,4 @@
-// /api/nba.js (Vercel serverless function)
+// /api/nba.js
 
 const API_BASE = "https://api.balldontlie.io/v1";
 
@@ -23,20 +23,16 @@ export default async function handler(req, res) {
   const headers = { Authorization: apiKey };
 
   try {
-    // ---------- SEARCH ----------
     if (type === "search") {
-      if (!q) return res.status(400).json({ error: "Missing ?q=" });
-
       const r = await fetch(
         `${API_BASE}/players?search=${encodeURIComponent(q)}&per_page=10`,
         { headers }
       );
 
-      if (!r.ok) return res.status(r.status).json({ error: await r.text() });
-
       const d = await r.json();
 
       return res.json({
+        source: "balldontlie",
         data: (d.data || []).map((p) => ({
           id: p.id,
           first_name: p.first_name,
@@ -44,40 +40,33 @@ export default async function handler(req, res) {
           position: p.position || "",
           team: p.team?.abbreviation || "",
         })),
+        fetched_at: new Date().toISOString(),
       });
     }
 
-    // ---------- GAMELOGS ----------
     if (type === "gamelogs") {
-      if (!player_id)
-        return res.status(400).json({ error: "Missing ?player_id=" });
-
       const lastN = Math.min(Math.max(parseInt(last_n, 10) || 10, 1), 20);
 
-      // Get player info
-      const pRes = await fetch(`${API_BASE}/players/${player_id}`, {
-        headers,
-      });
-
-      if (!pRes.ok)
-        return res.status(pRes.status).json({ error: await pRes.text() });
-
+      const pRes = await fetch(`${API_BASE}/players/${player_id}`, { headers });
       const pJson = await pRes.json();
+
       const teamId = pJson?.data?.team?.id;
       const teamAbbr = pJson?.data?.team?.abbreviation;
 
-      if (!teamId) return res.json({ data: [] });
+      if (!teamId) {
+        return res.json({
+          source: "balldontlie",
+          data: [],
+          fetched_at: new Date().toISOString(),
+        });
+      }
 
       const season = currentSeason();
 
-      // Get recent games
       const gamesRes = await fetch(
         `${API_BASE}/games?team_ids[]=${teamId}&seasons[]=${season}&per_page=100`,
         { headers }
       );
-
-      if (!gamesRes.ok)
-        return res.status(gamesRes.status).json({ error: await gamesRes.text() });
 
       const gamesJson = await gamesRes.json();
 
@@ -86,20 +75,20 @@ export default async function handler(req, res) {
         .sort((a, b) => new Date(b.date) - new Date(a.date))
         .slice(0, 25);
 
-      if (!games.length) return res.json({ data: [] });
+      if (!games.length) {
+        return res.json({
+          source: "balldontlie",
+          data: [],
+          fetched_at: new Date().toISOString(),
+        });
+      }
 
-      // Fetch stats
       let statsUrl = `${API_BASE}/stats?player_ids[]=${player_id}&per_page=100`;
-
       games.forEach((g) => {
         statsUrl += `&game_ids[]=${g.id}`;
       });
 
       const statsRes = await fetch(statsUrl, { headers });
-
-      if (!statsRes.ok)
-        return res.status(statsRes.status).json({ error: await statsRes.text() });
-
       const statsJson = await statsRes.json();
 
       const logs = (statsJson.data || [])
@@ -107,7 +96,6 @@ export default async function handler(req, res) {
         .slice(0, lastN)
         .map((s) => {
           const g = s.game;
-
           const home = g.home_team?.abbreviation;
           const visitor = g.visitor_team?.abbreviation;
           const opponent = teamAbbr === home ? visitor : home;
@@ -133,14 +121,22 @@ export default async function handler(req, res) {
             pra: num(s.pts) + num(s.reb) + num(s.ast),
           };
         })
-        .filter((log) => log.minutes > 0); // 🔥 critical fix
+        .filter((log) => log.minutes > 0);
 
-      return res.json({ data: logs });
+      return res.json({
+        source: "balldontlie",
+        data: logs,
+        fetched_at: new Date().toISOString(),
+      });
     }
 
     return res.status(400).json({ error: "Unknown type" });
   } catch (err) {
-    console.error(err);
-    return res.status(500).json({ error: "Server error", data: [] });
+    return res.status(500).json({
+      source: "balldontlie",
+      error: String(err),
+      data: [],
+      fetched_at: new Date().toISOString(),
+    });
   }
 }

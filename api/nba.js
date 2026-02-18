@@ -8,32 +8,29 @@ function num(v) {
   return Number.isFinite(n) ? n : 0;
 }
 
+// NBA season starts in October.
+// Example:
+// - Feb 2026 -> season should be 2025
+// - Nov 2026 -> season should be 2026
 function currentSeason() {
   const now = new Date();
-  // NBA season starts in October (month 9). Before that, it's previous year.
-  return now.getMonth() >= 9 ? now.getFullYear() : now.getFullYear() - 1;
+  const year = now.getFullYear();
+  const month = now.getMonth(); // 0=Jan ... 9=Oct
+
+  return month >= 9 ? year : year - 1;
 }
 
 export default async function handler(req, res) {
-  // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
   if (req.method === "OPTIONS") return res.status(200).end();
 
   const { type, q, player_id, last_n = "10" } = req.query;
 
   const apiKey = process.env.BALLDONTLIE_API_KEY;
-  if (!apiKey) {
-    return res.status(500).json({
-      source: "balldontlie",
-      error: "Missing BALLDONTLIE_API_KEY env var on Vercel",
-      data: [],
-      fetched_at: new Date().toISOString(),
-    });
-  }
-
-  const hdrs = { Authorization: apiKey };
+  const hdrs = apiKey ? { Authorization: apiKey } : {};
 
   try {
     // ---------- SEARCH ----------
@@ -44,6 +41,7 @@ export default async function handler(req, res) {
         `${API_BASE}/players?search=${encodeURIComponent(q)}&per_page=10`,
         { headers: hdrs }
       );
+
       if (!r.ok) return res.status(r.status).json({ error: await r.text() });
 
       const d = await r.json();
@@ -64,12 +62,15 @@ export default async function handler(req, res) {
 
     // ---------- GAMELOGS ----------
     if (type === "gamelogs") {
-      if (!player_id) return res.status(400).json({ error: "Missing ?player_id=" });
+      if (!player_id)
+        return res.status(400).json({ error: "Missing ?player_id=" });
 
       const lastN = Math.min(Math.max(parseInt(last_n, 10) || 10, 1), 50);
 
-      // 1) Get player info + team
-      const pRes = await fetch(`${API_BASE}/players/${player_id}`, { headers: hdrs });
+      // 1) Get player info (to infer team)
+      const pRes = await fetch(`${API_BASE}/players/${player_id}`, {
+        headers: hdrs,
+      });
       if (!pRes.ok) return res.status(pRes.status).json({ error: await pRes.text() });
 
       const pJson = await pRes.json();
@@ -84,20 +85,20 @@ export default async function handler(req, res) {
         });
       }
 
-      // 2) Fetch completed games (try current + previous season first)
+      // 2) Fetch games for current + previous season (Final only)
       const season = currentSeason();
       let games = await fetchGames(teamId, [season, season - 1], hdrs);
 
-      // 3) Fallback: if empty, try without season filter
+      // 3) Fallback: if still empty, fetch without seasons filter
       if (games.length === 0) {
         games = await fetchGames(teamId, [], hdrs);
       }
 
-      // 4) Sort newest first, take a larger slice to ensure we get enough stats rows
+      // 4) Sort by date desc, take a recent slice (more than lastN to be safe)
       games.sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
-      const recentGames = games.slice(0, lastN * 3);
+      const recent = games.slice(0, lastN * 2);
 
-      if (recentGames.length === 0) {
+      if (recent.length === 0) {
         return res.json({
           source: "balldontlie",
           data: [],
@@ -105,9 +106,9 @@ export default async function handler(req, res) {
         });
       }
 
-      // 5) Fetch stats for those games
+      // 5) Fetch stats for those games + player
       let statsUrl = `${API_BASE}/stats?player_ids[]=${player_id}&per_page=100`;
-      for (const g of recentGames) statsUrl += `&game_ids[]=${g.id}`;
+      for (const g of recent) statsUrl += `&game_ids[]=${g.id}`;
 
       const sRes = await fetch(statsUrl, { headers: hdrs });
       if (!sRes.ok) return res.status(sRes.status).json({ error: await sRes.text() });
@@ -115,27 +116,20 @@ export default async function handler(req, res) {
       const sJson = await sRes.json();
       const allStats = sJson?.data || [];
 
-      // 6) Sort newest first, take lastN
+      // 6) Sort stats by game date desc, take lastN
       allStats.sort((a, b) =>
         String(b.game?.date || "").localeCompare(String(a.game?.date || ""))
       );
       const top = allStats.slice(0, lastN);
 
-      // 7) Map to clean log objects (INCLUDES opponent)
+      // 7) Normalize + coerce numerics
       const logs = top.map((s) => {
         const g = s.game || {};
         const hAbbr = g.home_team?.abbreviation || "";
         const vAbbr = g.visitor_team?.abbreviation || "";
+        const opp = teamAbbr === hAbbr ? vAbbr : hAbbr;
 
-        // opponent calc
-        const opponent =
-          teamAbbr && hAbbr && vAbbr
-            ? teamAbbr === hAbbr
-              ? vAbbr
-              : hAbbr
-            : "";
-
-        // minutes can be "37", "37:12", number, or null
+        // minutes can be "37" or "37:12"
         let minutes = 0;
         if (s.min != null) {
           const parts = String(s.min).split(":");
@@ -148,7 +142,7 @@ export default async function handler(req, res) {
 
         return {
           date: String(g.date || "").split("T")[0],
-          opponent,                 // ✅ important for your UI
+          opponent: opp,
           minutes,
           pts,
           reb,
@@ -173,9 +167,9 @@ export default async function handler(req, res) {
       });
     }
 
-    return res.status(400).json({
-      error: "Unknown type. Use ?type=search or ?type=gamelogs",
-    });
+    return res
+      .status(400)
+      .json({ error: "Unknown type. Use ?type=search or ?type=gamelogs" });
   } catch (err) {
     console.error("[nba-api]", err);
     return res.status(500).json({

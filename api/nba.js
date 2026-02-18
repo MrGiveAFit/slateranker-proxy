@@ -14,8 +14,8 @@ export default async function handler(req, res) {
   const API_KEY = process.env.BALLDONTLIE_API_KEY;
 
   const headers = {
-    Authorization: API_KEY,
-  };
+  Authorization: `Bearer ${API_KEY}`,
+};
 
   try {
     // =========================================

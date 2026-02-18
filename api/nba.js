@@ -30,8 +30,17 @@ export default async function handler(req, res) {
     }
 
     if (type === "gamelogs") {
+  const pid = Number(player_id);
+
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return res.status(400).json({
+      error: "Invalid player_id. Must be an integer.",
+      received: player_id,
+    });
+  }
+
   const response = await fetch(
-    `https://api.balldontlie.io/v1/stats?player_ids[]=${player_id}&per_page=${last_n}`,
+    `https://api.balldontlie.io/v1/stats?player_ids[]=${pid}&per_page=${last_n}`,
     { headers }
   );
 
@@ -40,7 +49,7 @@ export default async function handler(req, res) {
   return res.status(200).json({
     source: "balldontlie",
     fetched_at: new Date().toISOString(),
-    raw_response: raw
+    data: raw.data ?? [],
   });
 }
 

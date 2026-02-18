@@ -31,7 +31,7 @@ export default async function handler(req, res) {
 
     if (type === "gamelogs") {
       const response = await fetch(
-        `https://api.balldontlie.io/v1/stats?player_ids[]=${player_id}&seasons[]=2026&per_page=${last_n}`,
+        `https://api.balldontlie.io/v1/stats?player_ids[]=${player_id}&seasons[]=2025&per_page=${last_n}`,
         { headers }
       );
       const data = await response.json();

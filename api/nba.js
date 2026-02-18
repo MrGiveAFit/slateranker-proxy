@@ -1,4 +1,4 @@
-// /api/nba.js (Vercel serverless function)
+// /api/nba.js
 
 const API_BASE = "https://api.balldontlie.io/v1";
 
@@ -9,7 +9,6 @@ function num(v) {
 
 function currentSeason() {
   const now = new Date();
-  // NBA season starts in October — if before October, use previous year
   return now.getMonth() >= 9 ? now.getFullYear() : now.getFullYear() - 1;
 }
 
@@ -21,113 +20,85 @@ export default async function handler(req, res) {
 
   const { type, q, player_id, last_n = "10" } = req.query;
   const apiKey = process.env.BALLDONTLIE_API_KEY;
-  const hdrs = { Authorization: apiKey };
+  const headers = { Authorization: apiKey };
 
   try {
-    // ---------- SEARCH ----------
+
+    // SEARCH
     if (type === "search") {
-      if (!q) return res.status(400).json({ error: "Missing ?q=" });
       const r = await fetch(
         `${API_BASE}/players?search=${encodeURIComponent(q)}&per_page=10`,
-        { headers: hdrs }
+        { headers }
       );
-      if (!r.ok) return res.status(r.status).json({ error: await r.text() });
-      const d = await r.json();
-      const players = (d.data || []).map((p) => ({
-        id: p.id,
-        first_name: p.first_name,
-        last_name: p.last_name,
-        position: p.position || "",
-        team: p.team?.abbreviation || "",
-      }));
+      const j = await r.json();
+
       return res.json({
         source: "balldontlie",
-        data: players,
-        fetched_at: new Date().toISOString(),
+        data: (j.data || []).map(p => ({
+          id: p.id,
+          first_name: p.first_name,
+          last_name: p.last_name,
+          position: p.position,
+          team: p.team?.abbreviation
+        })),
+        fetched_at: new Date().toISOString()
       });
     }
 
-    // ---------- GAMELOGS ----------
+    // GAMELOGS
     if (type === "gamelogs") {
-      if (!player_id)
-        return res.status(400).json({ error: "Missing ?player_id=" });
-      const lastN = Math.min(Math.max(parseInt(last_n, 10) || 10, 1), 50);
 
-      // 1) Get player info + team
-      const pRes = await fetch(`${API_BASE}/players/${player_id}`, {
-        headers: hdrs,
-      });
-      if (!pRes.ok) return res.status(pRes.status).json({ error: await pRes.text() });
+      const lastN = Math.min(Math.max(parseInt(last_n) || 10, 1), 50);
+
+      // Player
+      const pRes = await fetch(`${API_BASE}/players/${player_id}`, { headers });
       const pJson = await pRes.json();
-
       const teamId = pJson?.data?.team?.id;
-      const teamAbbr = String(pJson?.data?.team?.abbreviation || "");
-      if (!teamId)
-        return res.json({
-          source: "balldontlie",
-          data: [],
-          fetched_at: new Date().toISOString(),
-        });
+      const teamAbbr = pJson?.data?.team?.abbreviation;
 
-      // 2) Fetch games — try current + previous season first
+      if (!teamId) {
+        return res.json({ source: "balldontlie", data: [], fetched_at: new Date().toISOString() });
+      }
+
       const season = currentSeason();
-      let games = await fetchGames(teamId, [season, season - 1], hdrs);
 
-      // 3) Fallback: if no completed games, retry without season filter
-      if (games.length === 0) {
-        games = await fetchGames(teamId, [], hdrs);
-      }
-
-      // 4) Sort desc by date, take recent slice
-      games.sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
-      const recent = games.slice(0, lastN * 2);
-
-      if (recent.length === 0) {
-        return res.json({
-          source: "balldontlie",
-          data: [],
-          fetched_at: new Date().toISOString(),
-        });
-      }
-
-      // 5) Fetch stats (CHANGED: do NOT filter by game_ids yet, use season instead)
-      const statsUrl = `${API_BASE}/stats?player_ids[]=${player_id}&seasons[]=${currentSeason()}&per_page=100`;
-      const sRes = await fetch(statsUrl, { headers: hdrs });
-      if (!sRes.ok) return res.status(sRes.status).json({ error: await sRes.text() });
-      const sJson = await sRes.json();
-      const allStats = sJson?.data || [];
-
-      // 6) Sort stats by game date desc, take lastN
-      allStats.sort((a, b) =>
-        String(b.game?.date || "").localeCompare(String(a.game?.date || ""))
+      // Fetch games
+      const gRes = await fetch(
+        `${API_BASE}/games?team_ids[]=${teamId}&seasons[]=${season}&per_page=100`,
+        { headers }
       );
-      const top = allStats.slice(0, lastN);
+      const gJson = await gRes.json();
+      const games = (gJson.data || []).filter(g => g.status === "Final");
 
-      // 7) Map to clean log objects with all numerics coerced
-      const logs = top.map((s) => {
-        const g = s.game || {};
-        const hAbbr = g.home_team?.abbreviation || "";
-        const vAbbr = g.visitor_team?.abbreviation || "";
-        const opp = teamAbbr === hAbbr ? vAbbr : hAbbr;
+      if (games.length === 0) {
+        return res.json({ source: "balldontlie", data: [], fetched_at: new Date().toISOString() });
+      }
 
-        // Parse minutes — could be "37", "37:12", or a number
-        let minutes = 0;
-        if (s.min != null) {
-          const parts = String(s.min).split(":");
-          minutes = num(parts[0]);
-        }
+      // Fetch stats
+      let statsUrl = `${API_BASE}/stats?player_ids[]=${player_id}&per_page=100`;
+      games.slice(0, lastN * 2).forEach(g => {
+        statsUrl += `&game_ids[]=${g.id}`;
+      });
 
-        const pts = num(s.pts);
-        const reb = num(s.reb);
-        const ast = num(s.ast);
+      const sRes = await fetch(statsUrl, { headers });
+      const sJson = await sRes.json();
+      const stats = (sJson.data || []).slice(0, lastN);
+
+      const logs = stats.map(s => {
+
+        const g = s.game;
+        const homeId = g.home_team_id;
+        const visitorId = g.visitor_team_id;
+
+        const opponentId = teamId === homeId ? visitorId : homeId;
 
         return {
-          date: String(g.date || "").split("T")[0],
-          opponent: opp,
-          minutes,
-          pts,
-          reb,
-          ast,
+          date: g.date.split("T")[0],
+          opponent: opponentId, // returning ID instead of blank
+          minutes: num((s.min || "0").split(":")[0]),
+          pts: num(s.pts),
+          reb: num(s.reb),
+          ast: num(s.ast),
           three_pm: num(s.fg3m),
           fgm: num(s.fgm),
           fga: num(s.fga),
@@ -137,36 +108,25 @@ export default async function handler(req, res) {
           turnover: num(s.turnover),
           pf: num(s.pf),
           plus_minus: num(s.plus_minus),
-          pra: pts + reb + ast,
+          pra: num(s.pts) + num(s.reb) + num(s.ast)
         };
       });
 
       return res.json({
         source: "balldontlie",
         data: logs,
-        fetched_at: new Date().toISOString(),
+        fetched_at: new Date().toISOString()
       });
     }
 
-    return res
-      .status(400)
-      .json({ error: "Unknown type. Use ?type=search or ?type=gamelogs" });
+    return res.status(400).json({ error: "Invalid type" });
+
   } catch (err) {
-    console.error("[nba-api]", err);
     return res.status(500).json({
       source: "balldontlie",
       error: String(err),
       data: [],
-      fetched_at: new Date().toISOString(),
+      fetched_at: new Date().toISOString()
     });
   }
-}
-
-async function fetchGames(teamId, seasons, hdrs) {
-  let url = `${API_BASE}/games?team_ids[]=${teamId}&per_page=100`;
-  for (const s of seasons) url += `&seasons[]=${s}`;
-  const r = await fetch(url, { headers: hdrs });
-  if (!r.ok) return [];
-  const j = await r.json();
-  return (j.data || []).filter((g) => g.status === "Final");
 }

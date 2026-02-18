@@ -30,17 +30,19 @@ export default async function handler(req, res) {
     }
 
     if (type === "gamelogs") {
-      const response = await fetch(
-        `https://api.balldontlie.io/v1/stats?player_ids[]=${player_id}&seasons[]=2025&seasons[]=2024&per_page=${last_n}`,
-        { headers }
-      );
-      const data = await response.json();
-      return res.status(200).json({
-        source: "balldontlie",
-        fetched_at: new Date().toISOString(),
-        data: data.data,
-      });
-    }
+  const response = await fetch(
+    `https://api.balldontlie.io/v1/stats?player_ids[]=${player_id}&per_page=${last_n}`,
+    { headers }
+  );
+
+  const raw = await response.json();
+
+  return res.status(200).json({
+    source: "balldontlie",
+    fetched_at: new Date().toISOString(),
+    raw_response: raw
+  });
+}
 
     return res.status(400).json({ error: "Invalid type" });
   } catch (err) {

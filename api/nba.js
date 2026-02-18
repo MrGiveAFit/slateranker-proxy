@@ -1,5 +1,3 @@
-// /api/nba.js (Vercel serverless function)
-
 const API_BASE = "https://api.balldontlie.io/v1";
 
 function num(v) {
@@ -12,26 +10,17 @@ function currentSeason() {
   return now.getMonth() >= 9 ? now.getFullYear() : now.getFullYear() - 1;
 }
 
-function getHeaders() {
-  const key = process.env.BALLDONTLIE_API_KEY;
+function headers() {
   return {
     "Content-Type": "application/json",
-    "Authorization": `Bearer ${key}`
+    "Authorization": `Bearer ${process.env.BALLDONTLIE_API_KEY}`
   };
 }
 
 async function fetchJson(url) {
-  const r = await fetch(url, { headers: getHeaders() });
+  const r = await fetch(url, { headers: headers() });
   if (!r.ok) throw new Error(await r.text());
   return r.json();
-}
-
-async function fetchGames(teamId, seasons) {
-  let url = `${API_BASE}/games?team_ids[]=${teamId}&per_page=100`;
-  for (const s of seasons) url += `&seasons[]=${s}`;
-
-  const json = await fetchJson(url);
-  return (json.data || []).filter(g => g.status === "Final");
 }
 
 export default async function handler(req, res) {
@@ -44,31 +33,43 @@ export default async function handler(req, res) {
 
   try {
 
-    // SEARCH
+    // ===== SEARCH =====
     if (type === "search") {
       if (!q) return res.status(400).json({ error: "Missing ?q=" });
 
-      const url = `${API_BASE}/players?search=${encodeURIComponent(q)}&per_page=10`;
-      const json = await fetchJson(url);
+      // Attempt 1: normal search
+      let json = await fetchJson(
+        `${API_BASE}/players?search=${encodeURIComponent(q)}&per_page=10`
+      );
 
-      const players = (json.data || []).map(p => ({
-        id: p.id,
-        first_name: p.first_name,
-        last_name: p.last_name,
-        position: p.position || "",
-        team: p.team?.abbreviation || ""
-      }));
+      let players = json.data || [];
+
+      // Attempt 2: split name if empty
+      if (players.length === 0 && q.includes(" ")) {
+        const [first, last] = q.split(" ");
+        json = await fetchJson(
+          `${API_BASE}/players?first_name=${first}&last_name=${last}`
+        );
+        players = json.data || [];
+      }
 
       return res.json({
         source: "balldontlie",
-        data: players,
+        data: players.map(p => ({
+          id: p.id,
+          first_name: p.first_name,
+          last_name: p.last_name,
+          position: p.position || "",
+          team: p.team?.abbreviation || ""
+        })),
         fetched_at: new Date().toISOString()
       });
     }
 
-    // GAMELOGS
+    // ===== GAMELOGS =====
     if (type === "gamelogs") {
-      if (!player_id) return res.status(400).json({ error: "Missing ?player_id=" });
+      if (!player_id)
+        return res.status(400).json({ error: "Missing ?player_id=" });
 
       const lastN = Math.min(Math.max(parseInt(last_n, 10) || 10, 1), 50);
 
@@ -76,26 +77,26 @@ export default async function handler(req, res) {
       const teamId = playerJson.data?.team?.id;
       const teamAbbr = playerJson.data?.team?.abbreviation || "";
 
-      if (!teamId) {
+      if (!teamId)
         return res.json({ source: "balldontlie", data: [] });
-      }
 
       const season = currentSeason();
-      let games = await fetchGames(teamId, [season, season - 1]);
 
-      if (games.length === 0) {
-        games = await fetchGames(teamId, []);
-      }
+      let gamesJson = await fetchJson(
+        `${API_BASE}/games?team_ids[]=${teamId}&seasons[]=${season}&per_page=100`
+      );
+
+      let games = (gamesJson.data || []).filter(g => g.status === "Final");
 
       games.sort((a, b) => b.date.localeCompare(a.date));
       const recent = games.slice(0, lastN * 2);
 
-      if (recent.length === 0) {
+      if (recent.length === 0)
         return res.json({ source: "balldontlie", data: [] });
-      }
 
       let statsUrl = `${API_BASE}/stats?player_ids[]=${player_id}&per_page=100`;
-      for (const g of recent) statsUrl += `&game_ids[]=${g.id}`;
+      for (const g of recent)
+        statsUrl += `&game_ids[]=${g.id}`;
 
       const statsJson = await fetchJson(statsUrl);
       const allStats = statsJson.data || [];
@@ -152,7 +153,6 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "Unknown type" });
 
   } catch (err) {
-    console.error(err);
     return res.status(500).json({
       error: String(err),
       data: []

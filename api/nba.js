@@ -1,5 +1,7 @@
 export default async function handler(req, res) {
-  // CORS
+  // -----------------------------
+  // CORS HEADERS
+  // -----------------------------
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -16,23 +18,27 @@ export default async function handler(req, res) {
   };
 
   try {
-    // 🔎 PLAYER SEARCH
+    // =========================================
+    // PLAYER SEARCH
+    // =========================================
     if (type === "search") {
       const response = await fetch(
         `https://api.balldontlie.io/v1/players?search=${q}`,
         { headers }
       );
 
-      const data = await response.json();
+      const json = await response.json();
 
       return res.status(200).json({
         source: "balldontlie",
         fetched_at: new Date().toISOString(),
-        data: data.data || [],
+        data: json.data || [],
       });
     }
 
-    // 📊 GAME LOGS (player → team games → stats)
+    // =========================================
+    // GAMELOGS (player → team → games → stats)
+    // =========================================
     if (type === "gamelogs") {
       const pid = Number(player_id);
       const n = Number(last_n);
@@ -44,7 +50,7 @@ export default async function handler(req, res) {
         });
       }
 
-      // 1️⃣ Get player (to get team_id)
+      // 1️⃣ Get player to retrieve team ID
       const playerRes = await fetch(
         `https://api.balldontlie.io/v1/players/${pid}`,
         { headers }
@@ -61,7 +67,7 @@ export default async function handler(req, res) {
         });
       }
 
-      // 2️⃣ Get recent FINAL games for that team
+      // 2️⃣ Get recent completed games for that team
       const gamesRes = await fetch(
         `https://api.balldontlie.io/v1/games?team_ids[]=${teamId}&seasons[]=2025&per_page=50`,
         { headers }
@@ -69,7 +75,7 @@ export default async function handler(req, res) {
 
       const gamesJson = await gamesRes.json();
 
-      const gameIds = (gamesJson?.data || [])
+      const gameIds = (gamesJson.data || [])
         .filter((g) => g.status === "Final")
         .slice(0, Number.isFinite(n) ? n : 10)
         .map((g) => g.id);
@@ -95,12 +101,16 @@ export default async function handler(req, res) {
       return res.status(200).json({
         source: "balldontlie",
         fetched_at: new Date().toISOString(),
-        data: statsJson?.data || [],
+        data: statsJson.data || [],
       });
     }
 
-    // ❌ Invalid type
-    return res.status(400).json({ error: "Invalid type" });
+    // =========================================
+    // INVALID TYPE
+    // =========================================
+    return res.status(400).json({
+      error: "Invalid type parameter",
+    });
 
   } catch (err) {
     return res.status(500).json({

@@ -1,89 +1,85 @@
-export function calculateProjection(logs, statKey, propLine) {
-  if (!logs || logs.length === 0) {
-    return null;
-  }
+// src/lib/projectionEngine.ts
 
-  // Remove DNP / zero-minute games
-  const cleaned = logs.filter(g => g.minutes > 0);
+export type PlayerGameLog = {
+  date: string;
+  minutes: number;
+  pts: number;
+  reb: number;
+  ast: number;
+  stl?: number;
+  blk?: number;
+  turnover?: number;
+  three_pm?: number;
+  fg3a?: number;
+  pra?: number;
+};
 
-  const values = cleaned.map(g => getStatValue(g, statKey));
+type ProjectionResult = {
+  projection: number;
+  l5: number;
+  l10: number;
+  floor: number;
+  ceiling: number;
+  stdDev: number;
+  overProbability: number;
+};
 
-  const l5 = values.slice(0, 5);
-  const l10 = values.slice(0, 10);
-
-  const meanL5 = mean(l5);
-  const meanL10 = mean(l10);
-
-  // Weighted mean (recent heavier)
-  const weighted = (meanL5 * 0.65) + (meanL10 * 0.35);
-
-  const stdDev = standardDeviation(values);
-
-  const floor = weighted - (stdDev * 0.8);
-  const ceiling = weighted + (stdDev * 1.2);
-
-  const overProbability = calculateOverProbability(weighted, stdDev, propLine);
-
-  return {
-    projection: round(weighted),
-    l5: round(meanL5),
-    l10: round(meanL10),
-    stdDev: round(stdDev),
-    floor: round(floor),
-    ceiling: round(ceiling),
-    overProbability: round(overProbability * 100)
-  };
+function average(nums: number[]) {
+  if (!nums.length) return 0;
+  return nums.reduce((a, b) => a + b, 0) / nums.length;
 }
 
-function getStatValue(game, key) {
-  if (key.includes("+")) {
-    const parts = key.split("+");
-    return parts.reduce((sum, stat) => sum + (Number(game[stat]) || 0), 0);
-  }
-
-  return Number(game[key]) || 0;
-}
-
-function mean(arr) {
-  if (!arr.length) return 0;
-  return arr.reduce((a, b) => a + b, 0) / arr.length;
-}
-
-function standardDeviation(arr) {
-  const avg = mean(arr);
-  const variance = mean(arr.map(v => Math.pow(v - avg, 2)));
+function stdDev(nums: number[]) {
+  if (nums.length <= 1) return 0;
+  const avg = average(nums);
+  const variance =
+    nums.reduce((sum, n) => sum + Math.pow(n - avg, 2), 0) / nums.length;
   return Math.sqrt(variance);
 }
 
-function calculateOverProbability(mean, stdDev, line) {
-  if (!line || stdDev === 0) return 0.5;
+export function calculateProjection(
+  logs: PlayerGameLog[],
+  statKey: keyof PlayerGameLog,
+  propLine: number
+): ProjectionResult | null {
+  if (!logs || logs.length === 0) return null;
 
-  const z = (line - mean) / stdDev;
-  return 1 - normalCDF(z);
-}
+  // Remove zero-minute games
+  const valid = logs.filter((g) => g.minutes > 0);
 
-function normalCDF(x) {
-  return (1 + erf(x / Math.sqrt(2))) / 2;
-}
+  if (valid.length === 0) return null;
 
-function erf(x) {
-  const sign = x >= 0 ? 1 : -1;
-  x = Math.abs(x);
+  const statValues = valid
+    .map((g) => Number(g[statKey] || 0))
+    .filter((v) => !isNaN(v));
 
-  const a1 = 0.254829592;
-  const a2 = -0.284496736;
-  const a3 = 1.421413741;
-  const a4 = -1.453152027;
-  const a5 = 1.061405429;
-  const p = 0.3275911;
+  if (statValues.length === 0) return null;
 
-  const t = 1 / (1 + p * x);
-  const y = 1 - (((((
-    a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Math.exp(-x * x);
+  const l5 = average(statValues.slice(0, 5));
+  const l10 = average(statValues.slice(0, 10));
 
-  return sign * y;
-}
+  // Weighted projection (L5 weighted heavier)
+  const projection = l5 * 0.6 + l10 * 0.4;
 
-function round(num) {
-  return Math.round(num * 10) / 10;
+  const deviation = stdDev(statValues.slice(0, 10));
+
+  const floor = projection - deviation;
+  const ceiling = projection + deviation;
+
+  // Simple probability model
+  let overProbability = 0.5;
+  if (deviation > 0) {
+    const z = (projection - propLine) / deviation;
+    overProbability = 0.5 + Math.atan(z) / Math.PI;
+  }
+
+  return {
+    projection,
+    l5,
+    l10,
+    floor,
+    ceiling,
+    stdDev: deviation,
+    overProbability: Math.max(0, Math.min(1, overProbability)),
+  };
 }

@@ -17,7 +17,9 @@ import { monteCarloProject, PropDirection, ProjectionResult } from "./projection
 type GameLog = {
   date: string;
   opponent?: string;
-  minutes: number;
+
+  // can be number or "37:12"
+  minutes: number | string;
 
   pts: number;
   reb: number;
@@ -27,11 +29,15 @@ type GameLog = {
   stl?: number;
   blk?: number;
 
-  three_pm?: number; // 3PT made
+  three_pm?: number; // 3PT made (some sources)
+  fg3m?: number;     // 3PT made (balldontlie naming)
   fg3a?: number;     // 3PT attempted
-  turnover?: number;
 
-  // If you add more later, no problem.
+  turnover?: number;
+  tov?: number; // alternate naming
+
+  // optional extras later
+  dunks?: number;
 };
 
 export type SlateProp = {
@@ -62,6 +68,11 @@ export type SlateProp = {
 export type RankedProp = {
   prop: SlateProp;
   result: ProjectionResult;
+
+  // optional extras you can use for better charts later
+  series: number[];
+  dates: string[];
+  minutes: number[];
 };
 
 // ---------------------------
@@ -99,6 +110,12 @@ function num(v: any) {
   return Number.isFinite(n) ? n : 0;
 }
 
+function minutesToNum(v: any) {
+  // supports 36 or "36:12"
+  if (typeof v === "string") return num(v.split(":")[0]);
+  return num(v);
+}
+
 function normalizeName(s: string) {
   return (s || "")
     .toLowerCase()
@@ -109,9 +126,6 @@ function normalizeName(s: string) {
 }
 
 function scoreNameMatch(candidateFull: string, queryFull: string) {
-  // Simple scoring:
-  // - exact match gets huge boost
-  // - contains all tokens gets medium
   const c = normalizeName(candidateFull);
   const q = normalizeName(queryFull);
   if (!c || !q) return 0;
@@ -121,40 +135,73 @@ function scoreNameMatch(candidateFull: string, queryFull: string) {
   let hits = 0;
   for (const t of tokens) if (c.includes(t)) hits += 1;
 
-  // weighted: more token matches, plus slight preference for shorter names (less noise)
   return hits * 100 - Math.max(0, c.length - q.length);
 }
 
-function seriesFromLogs(logs: GameLog[], statType: SlateProp["statType"]) {
-  // Ensure newest first
+function getThreePM(g: GameLog) {
+  // support both three_pm and fg3m
+  return num((g as any).three_pm ?? (g as any).fg3m);
+}
+
+function getTurnovers(g: GameLog) {
+  // support turnover or tov
+  return num((g as any).turnover ?? (g as any).tov);
+}
+
+/**
+ * IMPORTANT QUALITY FIX:
+ * Remove “0 minute” games (DNP / inactive / not in rotation).
+ * These destroy averages/projections, especially for rookies.
+ */
+function filterPlayableLogs(logs: GameLog[]) {
+  return (logs || []).filter((g) => minutesToNum((g as any).minutes) > 0);
+}
+
+function seriesFromLogs(logsRaw: GameLog[], statType: SlateProp["statType"]) {
+  // 1) filter out DNPs / 0-minute games
+  const logs = filterPlayableLogs(logsRaw);
+
+  // 2) newest first
   const sorted = [...logs].sort((a, b) => String(b.date).localeCompare(String(a.date)));
 
-  return sorted.map((g) => {
+  const series: number[] = [];
+  const dates: string[] = [];
+  const minutes: number[] = [];
+
+  for (const g of sorted) {
     const pts = num(g.pts);
     const reb = num(g.reb);
     const ast = num(g.ast);
 
+    let value = 0;
+
     switch (statType) {
-      case "PTS": return pts;
-      case "REB": return reb;
-      case "AST": return ast;
+      case "PTS": value = pts; break;
+      case "REB": value = reb; break;
+      case "AST": value = ast; break;
 
-      case "STL": return num((g as any).stl);
-      case "BLK": return num((g as any).blk);
+      case "STL": value = num((g as any).stl); break;
+      case "BLK": value = num((g as any).blk); break;
 
-      case "3PM": return num(g.three_pm);
-      case "3PA": return num(g.fg3a);
+      case "3PM": value = getThreePM(g); break;
+      case "3PA": value = num((g as any).fg3a); break;
 
-      case "TO": return num(g.turnover);
+      case "TO": value = getTurnovers(g); break;
 
-      case "PRA": return pts + reb + ast;
-      case "PR":  return pts + reb;
-      case "PA":  return pts + ast;
-      case "RA":  return reb + ast;
+      case "PRA": value = pts + reb + ast; break;
+      case "PR":  value = pts + reb; break;
+      case "PA":  value = pts + ast; break;
+      case "RA":  value = reb + ast; break;
 
-      default: return 0;
+      default: value = 0;
     }
-  });
+
+    series.push(value);
+    dates.push(String(g.date || "").slice(0, 10));
+    minutes.push(minutesToNum((g as any).minutes));
+  }
+
+  return { series, dates, minutes };
 }
 
 // ---------------------------
@@ -254,17 +301,22 @@ export async function analyzeSlate(props: SlateProp[]): Promise<RankedProp[]> {
     let playerId = p.playerId;
     if (!playerId) {
       playerId = await resolvePlayerId(p.playerName);
-      if (!playerId) {
-        // Skip this prop if we can't resolve the player
-        continue;
-      }
+      if (!playerId) continue;
     }
 
-    const logs = await fetchPlayerGameLogs(playerId, Math.max(10, lastN));
-    const series = seriesFromLogs(logs, p.statType).slice(0, lastN);
+    // Grab extra because we may filter out 0-minute games
+    const logsRaw = await fetchPlayerGameLogs(playerId, Math.min(50, Math.max(15, lastN + 10)));
+
+    const { series, dates, minutes } = seriesFromLogs(logsRaw, p.statType);
+
+    // after filtering, take lastN
+    const slicedSeries = series.slice(0, lastN);
+
+    // If player has too few playable games, skip
+    if (slicedSeries.length < Math.min(5, lastN)) continue;
 
     const result = monteCarloProject({
-      series,
+      series: slicedSeries,
       line: p.line,
       direction: p.pick,
       simulations: 7000,
@@ -272,8 +324,11 @@ export async function analyzeSlate(props: SlateProp[]): Promise<RankedProp[]> {
     });
 
     ranked.push({
-      prop: { ...p, playerId }, // keep resolved id
+      prop: { ...p, playerId },
       result,
+      series: slicedSeries,
+      dates: dates.slice(0, lastN),
+      minutes: minutes.slice(0, lastN),
     });
   }
 

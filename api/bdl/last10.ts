@@ -1,6 +1,4 @@
 // api/bdl/last10.ts
-import type { VercelRequest, VercelResponse } from "@vercel/node";
-
 const API_BASE = "https://api.balldontlie.io/v1";
 
 function getApiKey() {
@@ -26,23 +24,17 @@ function stdev(nums: number[]) {
   return Math.sqrt(v);
 }
 
-export default async function handler(req: VercelRequest, res: VercelResponse) {
+export default async function handler(req: any, res: any) {
   try {
-    const playerId = String(req.query.playerId || "").trim();
-    if (!playerId) {
-      return res.status(400).json({ error: "Missing playerId query param" });
-    }
+    const playerId = String(req.query?.playerId || "").trim();
+    if (!playerId) return res.status(400).json({ error: "Missing playerId query param" });
 
     const apiKey = getApiKey();
-    if (!apiKey) {
-      return res.status(500).json({ error: "Missing BALLDONTLIE_API_KEY in Vercel env" });
-    }
+    if (!apiKey) return res.status(500).json({ error: "Missing BALLDONTLIE_API_KEY in Vercel env" });
 
-    // Grab a window of recent stats, then sort by game date and take last 10.
-    // Stats endpoint supports player_ids[], start_date/end_date, per_page.  [oai_citation:1‡Balldontlie NBA API](https://nba.balldontlie.io/)
     const end = new Date();
     const start = new Date();
-    start.setDate(end.getDate() - 120); // wide net so we can usually find 10 games
+    start.setDate(end.getDate() - 120);
 
     const qs = new URLSearchParams();
     qs.set("per_page", "100");

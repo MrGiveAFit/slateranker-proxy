@@ -12,31 +12,24 @@ function setCors(res: VercelResponse) {
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   setCors(res);
 
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
-
-  if (req.method !== "GET") {
-    return res.status(405).json({ error: "Method not allowed" });
-  }
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
 
   const apiKey = process.env.BALLDONTLIE_API_KEY;
-  if (!apiKey) {
-    return res.status(500).json({ error: "Missing BALLDONTLIE_API_KEY on server" });
-  }
+  if (!apiKey) return res.status(500).json({ error: "Missing BALLDONTLIE_API_KEY" });
 
   const nameRaw = (req.query.name ?? "").toString().trim();
-  if (!nameRaw) {
-    return res.status(400).json({ error: "Missing query param: name" });
-  }
+  if (!nameRaw) return res.status(400).json({ error: "Missing name query param" });
 
   try {
-    // BallDontLie players endpoint supports search
-    const url = `${BDL_BASE}/players?search=${encodeURIComponent(nameRaw)}&per_page=10`;
+    // Goat version uses this format:
+    const url = `${BDL_BASE}/players?first_name=${encodeURIComponent(
+      nameRaw.split(" ")[0]
+    )}&last_name=${encodeURIComponent(nameRaw.split(" ")[1] ?? "")}`;
+
     const r = await fetch(url, {
       headers: {
         Authorization: apiKey,
-        "Content-Type": "application/json",
       },
     });
 
@@ -51,12 +44,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     const json = JSON.parse(text);
 
-    // Normalize to a small payload your app can use easily
     const players = (json?.data ?? []).map((p: any) => ({
       id: String(p.id),
-      first_name: p.first_name,
-      last_name: p.last_name,
-      full_name: `${p.first_name ?? ""} ${p.last_name ?? ""}`.trim(),
+      full_name: `${p.first_name} ${p.last_name}`,
       team: p.team?.abbreviation ?? null,
       position: p.position ?? null,
     }));

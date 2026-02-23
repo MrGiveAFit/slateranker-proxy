@@ -1,6 +1,4 @@
 // api/bdl/players.ts
-import type { VercelRequest, VercelResponse } from "@vercel/node";
-
 const API_BASE = "https://api.balldontlie.io/v1";
 
 function getApiKey() {
@@ -16,23 +14,16 @@ function splitName(full: string) {
   return { search: cleaned };
 }
 
-export default async function handler(req: VercelRequest, res: VercelResponse) {
+export default async function handler(req: any, res: any) {
   try {
-    const name = String(req.query.name || "").trim();
-    const team = String(req.query.team || "").trim().toUpperCase();
+    const name = String(req.query?.name || "").trim();
+    const team = String(req.query?.team || "").trim().toUpperCase();
 
-    if (!name) {
-      return res.status(400).json({ error: "Missing name query param" });
-    }
+    if (!name) return res.status(400).json({ error: "Missing name query param" });
 
     const apiKey = getApiKey();
-    if (!apiKey) {
-      return res.status(500).json({ error: "Missing BALLDONTLIE_API_KEY in Vercel env" });
-    }
+    if (!apiKey) return res.status(500).json({ error: "Missing BALLDONTLIE_API_KEY in Vercel env" });
 
-    // Build query:
-    // - If "First Last", use first_name + last_name (much more reliable than search="First Last")
-    // - Else use search=<name>
     const parts = splitName(name);
     const qs = new URLSearchParams();
     qs.set("per_page", "100");
@@ -49,7 +40,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const upstream = await fetch(url, {
       method: "GET",
       headers: {
-        // Per balldontlie docs: Authorization header carries the API key.  [oai_citation:0‡Balldontlie NBA API](https://nba.balldontlie.io/)
         Authorization: apiKey,
       },
     });
@@ -66,7 +56,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     const json = JSON.parse(text);
 
-    // Normalize to what your app expects:
     const players = (json?.data || []).map((p: any) => ({
       id: String(p.id),
       full_name: `${p.first_name ?? ""} ${p.last_name ?? ""}`.trim(),

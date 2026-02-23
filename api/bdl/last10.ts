@@ -2,106 +2,198 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 
 type StatRow = {
-  pts: number | null;
-  reb: number | null;
-  ast: number | null;
-  game?: { date?: string };
+  pts?: number;
+  reb?: number;
+  ast?: number;
+  // balldontlie sometimes uses these:
+  game?: { date?: string; datetime?: string };
+  game_id?: number;
+  // fallback fields we might see in some payloads
+  date?: string;
+  min?: string;
 };
 
-function toNum(v: unknown): number {
-  const n = typeof v === "number" ? v : Number(v);
-  return Number.isFinite(n) ? n : 0;
+function isNumber(x: any): x is number {
+  return typeof x === "number" && Number.isFinite(x);
 }
 
-function avg(nums: number[]) {
+function toISODate(d: Date) {
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+// NBA "season" in balldontlie v1 is the season start year
+// Example: 2024-10-22 is season 2024.
+function currentSeasonStartYear(now = new Date()) {
+  const y = now.getFullYear();
+  const m = now.getMonth() + 1; // 1-12
+  return m >= 10 ? y : y - 1;
+}
+
+function mean(nums: number[]) {
   if (!nums.length) return 0;
   return nums.reduce((a, b) => a + b, 0) / nums.length;
 }
 
-function stdev(nums: number[]) {
-  if (nums.length < 2) return 0;
-  const m = avg(nums);
-  const variance = avg(nums.map((x) => (x - m) ** 2));
-  return Math.sqrt(variance);
+function stddev(nums: number[]) {
+  if (nums.length <= 1) return 0;
+  const m = mean(nums);
+  const v = nums.reduce((acc, n) => acc + (n - m) ** 2, 0) / (nums.length - 1);
+  return Math.sqrt(v);
+}
+
+function pickDate(s: any): string {
+  // Try common shapes
+  const d =
+    s?.game?.date ||
+    s?.game?.datetime ||
+    s?.date ||
+    null;
+
+  if (!d) return "";
+  // If datetime, keep YYYY-MM-DD
+  if (typeof d === "string" && d.includes("T")) return d.slice(0, 10);
+  return String(d);
+}
+
+async function bdlFetch(url: string) {
+  const apiKey = process.env.BDL_API_KEY;
+  if (!apiKey) {
+    throw new Error("Missing BDL_API_KEY env var on Vercel");
+  }
+
+  const res = await fetch(url, {
+    headers: {
+      Authorization: apiKey,
+    },
+  });
+
+  const text = await res.text();
+  let json: any = null;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    // keep null
+  }
+
+  if (!res.ok) {
+    const msg =
+      json?.error ||
+      json?.message ||
+      `BDL request failed (${res.status})`;
+    const err = new Error(msg);
+    (err as any).status = res.status;
+    (err as any).payload = json ?? text;
+    throw err;
+  }
+
+  return json;
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
-    const playerId = String(req.query.playerId ?? "").trim();
-    const n = Math.min(Math.max(toNum(req.query.n ?? 10), 1), 25);
-
+    const playerId = req.query.playerId;
     if (!playerId) {
-      return res.status(400).json({ error: "Missing ?playerId=" });
+      return res.status(400).json({ error: "Missing playerId query param" });
     }
 
-    const apiKey = process.env.BALLDONTLIE_API_KEY;
-    if (!apiKey) {
-      return res.status(500).json({ error: "Missing BALLDONTLIE_API_KEY env var" });
+    const pid = String(playerId);
+
+    // We’ll pull enough rows to safely find 10 *recent* games.
+    // Use current season and a date window to avoid ancient junk.
+    const season = currentSeasonStartYear(new Date());
+
+    // Look back ~140 days (covers most of the “last 10 games” idea even with breaks)
+    const end = new Date();
+    const start = new Date();
+    start.setDate(end.getDate() - 140);
+
+    const startDate = toISODate(start);
+    const endDate = toISODate(end);
+
+    // Cursor pagination (max per_page = 100)
+    // Stats endpoint expects arrays: player_ids[]=X, seasons[]=YYYY
+    let cursor: string | number | undefined = undefined;
+    const collected: StatRow[] = [];
+
+    // Hard stop to avoid runaway loops
+    for (let i = 0; i < 6; i++) {
+      const params = new URLSearchParams();
+      params.set("per_page", "100");
+      params.append("player_ids[]", pid);
+      params.append("seasons[]", String(season));
+      params.set("start_date", startDate);
+      params.set("end_date", endDate);
+      // period=0 full game stats (docs: 0 default, but we’ll be explicit)
+      params.set("period", "0");
+      if (cursor != null) params.set("cursor", String(cursor));
+
+      const url = `https://api.balldontlie.io/v1/stats?${params.toString()}`;
+      const json = await bdlFetch(url);
+
+      const rows: StatRow[] = Array.isArray(json?.data) ? json.data : [];
+      collected.push(...rows);
+
+      const next = json?.meta?.next_cursor;
+      if (!next) break;
+      cursor = next;
+
+      // If we already have plenty, stop early
+      if (collected.length >= 250) break;
     }
 
-    // BDL v1 "stats" endpoint (most common). We try with sort param first; if it fails, retry without it.
-    const base = "https://api.balldontlie.io/v1/stats";
-    const urlWithSort = `${base}?player_ids[]=${encodeURIComponent(playerId)}&per_page=${n}&sort=-game.date`;
-    const urlNoSort = `${base}?player_ids[]=${encodeURIComponent(playerId)}&per_page=${n}`;
+    // Sort newest first by date if we can read it
+    const withDates = collected
+      .map((s) => ({ s, date: pickDate(s) }))
+      .filter((x) => x.date); // keep ones with dates
 
-    const doFetch = async (url: string) => {
-      const r = await fetch(url, {
-        headers: {
-          // BDL commonly uses Authorization: <key>
-          Authorization: apiKey,
-          // Some APIs accept x-api-key; harmless to include
-          "x-api-key": apiKey,
-        },
-      });
-      const text = await r.text();
-      let json: any = null;
-      try {
-        json = JSON.parse(text);
-      } catch {
-        json = { raw: text };
-      }
-      return { ok: r.ok, status: r.status, json };
-    };
+    withDates.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
 
-    let out = await doFetch(urlWithSort);
-    if (!out.ok) out = await doFetch(urlNoSort);
+    // Take last 10 games with valid box score numbers
+    const last10 = withDates
+      .map((x) => x.s)
+      .filter((s) => isNumber(s.pts) && isNumber(s.reb) && isNumber(s.ast))
+      .slice(0, 10);
 
-    if (!out.ok) {
-      return res.status(out.status).json({
-        error: "BDL request failed",
-        status: out.status,
-        details: out.json,
-      });
-    }
+    const ptsArr = last10.map((g) => Number(g.pts));
+    const rebArr = last10.map((g) => Number(g.reb));
+    const astArr = last10.map((g) => Number(g.ast));
 
-    const rows: StatRow[] = Array.isArray(out.json?.data) ? out.json.data : [];
-    const games = rows.slice(0, n).map((r) => ({
-      date: r.game?.date ?? null,
-      pts: toNum(r.pts),
-      reb: toNum(r.reb),
-      ast: toNum(r.ast),
+    const games = last10.map((g) => ({
+      date: pickDate(g),
+      pts: Number(g.pts ?? 0),
+      reb: Number(g.reb ?? 0),
+      ast: Number(g.ast ?? 0),
     }));
 
-    const ptsArr = games.map((g) => g.pts);
-    const rebArr = games.map((g) => g.reb);
-    const astArr = games.map((g) => g.ast);
-
-    const averages = {
-      pts: Number(avg(ptsArr).toFixed(1)),
-      reb: Number(avg(rebArr).toFixed(1)),
-      ast: Number(avg(astArr).toFixed(1)),
-      gamesAnalyzed: games.length,
-    };
-
-    const volatility = {
-      pts: Number(stdev(ptsArr).toFixed(2)),
-      reb: Number(stdev(rebArr).toFixed(2)),
-      ast: Number(stdev(astArr).toFixed(2)),
-    };
-
-    res.setHeader("Cache-Control", "s-maxage=300, stale-while-revalidate=600");
-    return res.status(200).json({ playerId, averages, volatility, games });
+    return res.status(200).json({
+      playerId: pid,
+      averages: {
+        pts: Number(mean(ptsArr).toFixed(2)),
+        reb: Number(mean(rebArr).toFixed(2)),
+        ast: Number(mean(astArr).toFixed(2)),
+        gamesAnalyzed: last10.length,
+      },
+      volatility: {
+        pts: Number(stddev(ptsArr).toFixed(2)),
+        reb: Number(stddev(rebArr).toFixed(2)),
+        ast: Number(stddev(astArr).toFixed(2)),
+      },
+      games,
+      meta: {
+        season,
+        startDate,
+        endDate,
+        totalRowsFetched: collected.length,
+      },
+    });
   } catch (e: any) {
-    return res.status(500).json({ error: e?.message ?? "Unknown error" });
+    const status = e?.status && Number.isFinite(e.status) ? e.status : 500;
+    return res.status(status).json({
+      error: e?.message || "Unknown error",
+      details: e?.payload || null,
+    });
   }
 }

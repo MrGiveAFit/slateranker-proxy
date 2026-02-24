@@ -1,9 +1,11 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 
+const NBA_STATS_BASE = "https://stats.nba.com/stats";
+
 function nbaHeaders() {
   return {
     "User-Agent":
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121 Safari/537.36",
     Accept: "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
     Origin: "https://www.nba.com",
@@ -12,57 +14,55 @@ function nbaHeaders() {
   };
 }
 
-function getSeasonString() {
-  const date = new Date();
-  const y = date.getFullYear();
-  const m = date.getMonth();
-  const startYear = m >= 9 ? y : y - 1;
-  const endYear2 = String((startYear + 1) % 100).padStart(2, "0");
-  return `${startYear}-${endYear2}`;
+function currentSeason(): string {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = now.getMonth() + 1;
+  const startYear = m >= 10 ? y : y - 1;
+  const endYY = String((startYear + 1) % 100).padStart(2, "0");
+  return `${startYear}-${endYY}`;
 }
 
 function mean(arr: number[]) {
-  return arr.length
-    ? arr.reduce((s, v) => s + v, 0) / arr.length
-    : 0;
+  if (!arr.length) return 0;
+  return arr.reduce((s, v) => s + v, 0) / arr.length;
 }
 
-function stddev(arr: number[]) {
+function stdDev(arr: number[]) {
   if (arr.length < 2) return 0;
   const m = mean(arr);
-  const v =
-    arr.reduce((s, x) => s + (x - m) ** 2, 0) /
-    (arr.length - 1);
+  const v = arr.reduce((s, x) => s + (x - m) * (x - m), 0) / (arr.length - 1);
   return Math.sqrt(v);
 }
 
-export default async function handler(
-  req: VercelRequest,
-  res: VercelResponse
-) {
+// NBA Stats playergamelog rowSet columns include:
+// GAME_DATE, MATCHUP, WL, MIN, FGM, FGA, FG_PCT, FG3M, ... REB, AST, STL, BLK, TOV, PF, PTS
+export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
     const playerId = String(req.query.playerId || "").trim();
     if (!playerId) {
       return res.status(400).json({ error: "Missing ?playerId=" });
     }
 
-    const season = getSeasonString();
+    const season = currentSeason();
 
     const url =
-      "https://stats.nba.com/stats/playergamelog" +
-      `?PlayerID=${playerId}` +
-      `&Season=${season}` +
-      `&SeasonType=Regular%20Season`;
+      `${NBA_STATS_BASE}/playergamelog` +
+      `?LeagueID=00&Season=${encodeURIComponent(season)}` +
+      `&SeasonType=Regular+Season&PlayerID=${encodeURIComponent(playerId)}`;
 
-    const response = await fetch(url, { headers: nbaHeaders() });
-    if (!response.ok) {
-      throw new Error(`NBAStats HTTP ${response.status}`);
+    const r = await fetch(url, { headers: nbaHeaders() });
+    if (!r.ok) {
+      const text = await r.text().catch(() => "");
+      return res
+        .status(500)
+        .json({ error: `NBA Stats error ${r.status}`, detail: text.slice(0, 300) });
     }
 
-    const data = await response.json();
-    const rs = data?.resultSets?.[0] || data?.resultSet;
-    const headers = rs?.headers || [];
-    const rows = rs?.rowSet || [];
+    const json: any = await r.json();
+    const rs = json?.resultSets?.[0] || json?.resultSet;
+    const headers: string[] = rs?.headers || [];
+    const rows: any[][] = rs?.rowSet || [];
 
     const idx = (h: string) => headers.indexOf(h);
 
@@ -71,34 +71,47 @@ export default async function handler(
     const iReb = idx("REB");
     const iAst = idx("AST");
 
+    if (iDate === -1 || iPts === -1 || iReb === -1 || iAst === -1) {
+      return res.status(500).json({
+        error: "Unexpected NBA Stats response format (missing columns)",
+        headers,
+      });
+    }
+
     const games = rows
-      .map((r: any[]) => ({
-        date: r[iDate],
-        pts: Number(r[iPts] || 0),
-        reb: Number(r[iReb] || 0),
-        ast: Number(r[iAst] || 0),
+      .map((row) => ({
+        date: String(row[iDate]),
+        pts: Number(row[iPts]) || 0,
+        reb: Number(row[iReb]) || 0,
+        ast: Number(row[iAst]) || 0,
       }))
+      // NBA Stats returns most recent first, keep it that way
       .slice(0, 10);
 
-    const ptsArr = games.map(g => g.pts);
-    const rebArr = games.map(g => g.reb);
-    const astArr = games.map(g => g.ast);
+    const ptsArr = games.map((g) => g.pts);
+    const rebArr = games.map((g) => g.reb);
+    const astArr = games.map((g) => g.ast);
+
+    const averages = {
+      pts: Number(mean(ptsArr).toFixed(1)),
+      reb: Number(mean(rebArr).toFixed(1)),
+      ast: Number(mean(astArr).toFixed(1)),
+      gamesAnalyzed: games.length,
+    };
+
+    const volatility = {
+      pts: Number(stdDev(ptsArr).toFixed(1)),
+      reb: Number(stdDev(rebArr).toFixed(1)),
+      ast: Number(stdDev(astArr).toFixed(1)),
+    };
 
     return res.status(200).json({
-      averages: {
-        pts: Number(mean(ptsArr).toFixed(2)),
-        reb: Number(mean(rebArr).toFixed(2)),
-        ast: Number(mean(astArr).toFixed(2)),
-        gamesAnalyzed: games.length,
-      },
-      volatility: {
-        pts: Number(stddev(ptsArr).toFixed(2)),
-        reb: Number(stddev(rebArr).toFixed(2)),
-        ast: Number(stddev(astArr).toFixed(2)),
-      },
+      playerId,
+      averages,
+      volatility,
       games,
     });
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message });
+  } catch (e: any) {
+    return res.status(500).json({ error: e?.message || String(e) });
   }
 }
